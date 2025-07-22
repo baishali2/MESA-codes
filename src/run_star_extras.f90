@@ -30,11 +30,15 @@
          implicit none
 
          !arrays
+         ! Ra= accretion radius this is added and subtracted from the orbital radius to find the zone where the heat is injected
          real(dp), allocatable :: v(:), Ra(:), mdot_hl(:), fd_hl(:), edot_hl(:), Eorb(:), dEorb(:)                
          real(dp), allocatable :: eps_rho(:), fd_mr15_ratio(:), mdot_mr15_ratio(:), mdot_mr15(:), fd_mr15(:)
          real(dp), allocatable :: mdot_edd(:), mdot_hyper(:), mdot_arr(:), fd_arr(:), edot(:), f(:)
 
          !xtra variables - values for current step
+
+         ! a_curr= orbital radius,  e_curr= eccentricity, aa_curr and bb_curr= semi-major andsemi- minor axes of the ellipse, omega_curr and omega_env= the angular velocity(?)
+         ! Q= mass_quadrapole moment,  strain_curr = strain from gravitational wave
          integer, parameter :: a_curr = 1, M_ns_curr = 2, M_acc_curr = 3, omega_env = 4                    !values for the current timestep
          integer, parameter :: omega_curr = 5, Q_curr = 6, Qmax_curr = 7, Qtb_curr = 8       !values for the current timestep
          integer, parameter :: e_curr = 9, aa_curr = 10, bb_curr = 11, mom_inert_curr = 12   !values for the current timestep
