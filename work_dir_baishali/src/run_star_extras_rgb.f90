@@ -34,6 +34,11 @@
          real(dp), allocatable :: eps_rho(:), fd_mr15_ratio(:), mdot_mr15_ratio(:), mdot_mr15(:), fd_mr15(:)
          real(dp), allocatable :: mdot_edd(:), mdot_hyper(:), mdot_arr(:), fd_arr(:), edot(:), f(:)
 
+         !extra smoothing variables
+         real(dp), allocatable :: R_smooth(:), m_smooth(:), rho_boundary_smooth(:), scale_height_smooth(:), v_smooth(:)
+         real(dp), allocatable :: Ra_smooth(:), eps_rho_smooth(:), mr15_ratio_smooth(:),mdot_hl_smooth(:), fd_hl_smooth(:)
+         real(dp), allocatable :: fd_mr15_smooth(:), fd_array_smooth(:), dEorb_smooth(:),f_smooth(:), edot_smooth(:)
+
          !xtra variables - values for current step
          integer, parameter :: a_curr = 1, M_ns_curr = 2, M_acc_curr = 3, omega_env = 4                    !values for the current timestep
          integer, parameter :: omega_curr = 5, Q_curr = 6, Qmax_curr = 7, Qtb_curr = 8       !values for the current timestep
@@ -57,6 +62,12 @@
          real(dp) :: v_rel, Ra_br, mdot_br, fd_br, edot_br, mdot_hl_br
          real(dp) :: mdot_mr15_ratio_br, mdot_mr15_br, fd_mr15_ratio_br, fd_mr15_br, fd_hl_br
          integer :: azone
+
+         ! variables for interpolation 
+         integer :: n_profile_points
+         real(dp), allocatable :: prof_mass_target(:),prof_mass_target_values(:),prof_mass_y2(:), prof_rho(:), prof_y2(:)
+         logical :: relax_density = .true.
+         logical :: relax_mass = .true.
 
          contains
 
@@ -252,14 +263,274 @@
          
          !evaluating the k values
          call G(id, ierr, t, a_in, k1)
-         call G(id, ierr, t + dt/2, a_in + k1/2, k2)
-         call G(id, ierr, t + dt/2, a_in + k2/2, k3)
-         call G(id, ierr, t + dt, a_in + k3, k4)
+         call G(id, ierr, t + dt/2, a_in + dt*k1/2, k2)
+         call G(id, ierr, t + dt/2, a_in + dt*k2/2, k3)
+         call G(id, ierr, t + dt, a_in + dt*k3, k4)
          
          !evaluating the next value of a
          a_out = a_in + dt*(k1 + 2*k2 + 2*k3 + k4)/6
       end subroutine rk4
 
+      subroutine rk4_small_step(id, ierr, a_in, t, dt, a_out,R_smooth, f_smooth, n_smooth, v_smooth, fd_array_smooth, dEorb_smooth, m_smooth, rho_boundary_smooth)
+         !star variables
+         integer, intent(in) :: id
+         integer, intent(out) :: ierr
+         type (star_info), pointer :: s
+         
+         !subroutine variables
+         real(dp), intent(in) :: a_in, t, dt
+         real(dp), intent(out) :: a_out
+         real(dp) :: k1, k2, k3, k4
+         real(dp) :: dt_small , t_curr
+         real(dp) :: a_temp
+         integer :: i
+         integer, intent(in) :: n_smooth
+         integer :: this_zone
+         integer :: unit_log
+
+         ! arrays for printing every small timestep
+         real(dp), intent(in) :: R_smooth(:), f_smooth(:), v_smooth(:)
+         real(dp), intent(in) :: fd_array_smooth(:), dEorb_smooth(:)
+         real(dp), intent(in) :: m_smooth(:), rho_boundary_smooth(:)
+
+         ! file variables
+         logical :: file_exists
+         integer :: filesize
+         
+         !getting pointer to star
+         ierr = 0
+         call star_ptr(id, s, ierr)
+         if (ierr /= 0) return
+
+         ! print *, 'rk4 called'
+
+         dt_small = dt/10
+         a_temp = a_in
+         t_curr = t
+         
+
+         ! check if file exists and has content
+         inquire(file='orbit_substeps.data', exist=file_exists, size=filesize)
+
+         unit_log = 255
+         ! open the file in append mode
+         open(unit=unit_log, file='orbit_substeps.data', status='unknown', position='append', action='write')
+
+         ! only write header if file is new or empty
+         if (.not. file_exists .or. filesize == 0) then
+            write(unit_log,'(a)') 'model    step    time        a_temp       zone         R          f(k)        v         fd         dEorb        m         rho              problematic_value'
+         end if
+         
+         !evaluating the k values  ! not using pointer to avoid extra arguments problem
+         do i = 1,10
+            call smooth_orbital_evolution_function_holgado(id, ierr, t_curr, a_temp, k1, R_smooth, f_smooth, n_smooth)
+            call smooth_orbital_evolution_function_holgado(id, ierr, t_curr + dt_small/2, a_temp + dt_small*k1/2, k2, R_smooth, f_smooth, n_smooth)
+            call smooth_orbital_evolution_function_holgado(id, ierr, t_curr + dt_small/2, a_temp + dt_small*k2/2, k3, R_smooth, f_smooth, n_smooth)
+            call smooth_orbital_evolution_function_holgado(id, ierr, t_curr + dt_small, a_temp + dt_small*k3, k4, R_smooth, f_smooth, n_smooth)
+            a_temp = a_temp + dt_small*(k1 + 2*k2 + 2*k3 + k4)/6
+            t_curr = t_curr + dt_small
+
+            ! Find the orbital zone corresponding to current separation
+            call find_zone(R_smooth(1:n_smooth), a_temp, this_zone)
+
+            
+            ! Write quantities to file
+            
+            write(unit_log,'(I6,1X,I6,1X,ES12.4,1X,ES12.4,1X,I6,1X,8(1X,ES12.4))') &
+               s%model_number, i, t_curr, a_temp, this_zone, &
+               R_smooth(this_zone), f_smooth(this_zone), v_smooth(this_zone), &
+               fd_array_smooth(this_zone), dEorb_smooth(this_zone), &
+               m_smooth(this_zone), rho_boundary_smooth(this_zone), &
+               m_smooth(this_zone)/R_smooth(this_zone) - 4.0_dp*pi*(R_smooth(this_zone)**2)*rho_boundary_smooth(this_zone)
+         end do
+
+         close(unit_log)
+
+         a_out = a_temp
+
+      end subroutine rk4_small_step
+
+
+      !Cash-Karp method(rk5 with embedded rk4)
+      subroutine integrate_orbit_adaptive2(id, ierr, a_in, t_start, dt_mesa, a_out)
+         use const_def, only: dp
+         implicit none
+         integer, intent(in) :: id
+         integer, intent(out) :: ierr
+         real(dp), intent(in) :: a_in, t_start, dt_mesa
+         real(dp), intent(out) :: a_out
+         type(star_info), pointer :: s
+
+         ! RKCK / Cash-Karp coefficients
+         real(dp), parameter :: c1=37.0d0/378.0d0, c3=250.0d0/621.0d0, c4=125.0d0/594.0d0, c6=512.0d0/1771.0d0
+         real(dp), parameter :: d1= 2825.0d0/27648.0d0, d3=18575.0d0/48384.0d0, d4=13525.0d0/55296.0d0, d5=277.0d0/14336.0d0, d6=1.0d0/4.0d0
+
+         ! Local variables
+         real(dp) :: t, a, dt, dt_min, dt_max, rel_tol, safety, err_est, abs_tol, err_norm, tol
+         real(dp) :: k1, k2, k3, k4, k5, k6, a_5th, a_4th
+         integer :: nsteps
+         real(dp), parameter :: abs_max_change = 0.05  ! max 5% change per substep
+         real(dp), parameter :: min_increment = 1d-8 ! minimum absolute change
+         procedure(orbital_evolution_function_holgado), pointer :: G
+
+         ierr = 0
+         call star_ptr(id, s, ierr)
+         if (ierr /= 0) return
+
+         G => orbital_evolution_function_holgado
+
+         ! ---- Adaptive RK settings ----
+         rel_tol = 1d-10             ! relative error tolerance ! should i change it to 1d-5??
+         nsteps = 10             ! minimum number of substeps per MESA dt
+         dt_max = dt_mesa / nsteps
+         dt_min = dt_mesa *1e-5_dp  ! prevent dt from being ridiculously small(lol)
+         safety = 0.85           ! timestep safety factor
+         t = t_start
+         a = a_in
+         dt = dt_max
+         abs_tol = 1d-10
+         tol = 1d-10
+
+         ! ---- Integration loop ----
+         do while (t < t_start + dt_mesa)
+
+            if (t + dt > t_start + dt_mesa) dt = t_start + dt_mesa - t
+
+            ! Compute RKCK k-values
+            call G(id, ierr, t,a,k1)
+            call G(id, ierr, t+dt/5, a+dt*k1/5,  k2)
+            call G(id, ierr, t+3*dt/10, a+dt*(3*k1/40 + 9./40*k2), k3)
+            call G(id, ierr, t+3*dt/5, a+dt*(3*k1/10 - 9*k2/10 + 6*k3/5), k4)
+            call G(id, ierr, t+dt, a+dt*(-11*k1/54 + 5*k2/2 - 70*k3/27 + 35*k4/27), k5)
+            call G(id, ierr, t+7*dt/8, a+dt*(1631*k1/55296 + 175*k2/512 + 575*k3/13824 + 44275*k4/110592 + 253*k5/4096), k6)
+
+            ! 5th and 4th order solutions
+            a_5th = a + dt*(37*k1/378 + 250*k3/621 + 125*k4/594 + 512*k6/1771)
+            a_4th = a + dt*(2825*k1/27648 + 18575*k3/48384 + 13525*k4/55296 + 277*k5/14336 + k6/4)
+
+            
+
+            ! testing for absolute and relative error tolerances
+            err_est = abs(a_5th - a_4th) / (abs_tol + rel_tol*a_5th)
+
+            ! inside the integration loop, after computing k1..k6 and a_5th, a_4th:
+            !if (a_5th < 26.44670755724950*Rsun .and. a_5th > 24.0*Rsun) then
+               !print *, "DBG_ORBIT: model=", s%model_number, " t=", t, " dt=", dt, &
+               !" a=", a, " a5th=", a_5th, " k1=", k1, " k2=", k2, &
+               !" k3=", k3, " k4=", k4, " k5=", k5, " k6=", k6, &
+               !" err=", err_est
+            !end if
+
+
+            !if (s%model_number >= 38) then
+               !print *, "Model dt:", dt, err_est
+            !end if
+
+
+            ! Accept/reject step based on relative error 
+            if (err_est <= 1d0) then
+               ! accept the step
+               t = t + dt
+               a = a_5th
+
+
+               if (err_est > 0d0) then  ! choose next timestep
+                  dt = min(dt_max, dt * safety * (err_est)**(-0.2d0))
+               else
+                  dt = min(dt_max, dt * 10_dp)   !making timsstep 1 order bigger if error is zero
+               end if
+            
+            else
+               ! error too large, decrease timestep
+               dt = max(dt_min, dt * safety * err_est**(-0.25d0))  !decreasing more than increasing
+
+               if (dt <= dt_min) then
+                  print *, "WARNING: Minimum timestep reached and error still above tolerance!"
+                  print *, " t=", t, " a=", a, " err_est=", err_est, " dt=", dt
+                  ! At smallest timestep: accept anyway to keep going
+                  t = t + dt
+                  a = a_5th       ! accept best guess even if inaccurate
+                  dt = dt_min     ! stay at min dt or slowly increase later
+                  dt = min(dt_max, dt * 2.0d0) ! grow for the next step
+               end if
+            end if
+
+         end do
+
+         a_out = a
+
+      end subroutine integrate_orbit_adaptive2
+
+
+      ! this routine assumes everything is increasing
+      subroutine cubic_spline(x, y, n, x_new, y_new, n_new)
+         implicit none
+         integer, intent(in) :: n, n_new
+         real(dp), intent(in) :: x(n), y(n), x_new(n_new)
+         real(dp), intent(out) :: y_new(n_new)
+
+         ! Local variables
+         integer :: i, j, k
+         real(dp), allocatable :: a(:), b(:), c(:), d(:), h(:), alpha(:), l(:), mu(:), z(:)
+
+         ! Allocate arrays
+         allocate(a(n), b(n-1), c(n), d(n-1), h(n-1), alpha(n-1), l(n), mu(n), z(n))
+
+         ! Copy y into a
+         a = y
+
+         ! Step 1: Compute h and alpha
+         do i = 1, n-1
+            h(i) = x(i+1) - x(i)
+         end do
+
+         do i = 2, n-1
+            alpha(i) = (3.0_dp/h(i))*(a(i+1)-a(i)) - (3.0_dp/h(i-1))*(a(i)-a(i-1))
+         end do
+
+         ! Step 2: Solve tridiagonal system for c
+         l(1) = 1.0_dp
+         mu(1) = 0.0_dp
+         z(1) = 0.0_dp
+
+         do i = 2, n-1
+            l(i) = 2.0_dp*(x(i+1)-x(i-1)) - h(i-1)*mu(i-1)
+            mu(i) = h(i)/l(i)
+            z(i) = (alpha(i)-h(i-1)*z(i-1))/l(i)
+         end do
+
+         l(n) = 1.0_dp
+         z(n) = 0.0_dp
+         c(n) = 0.0_dp
+
+         do j = n-1, 1, -1
+            c(j) = z(j) - mu(j)*c(j+1)
+            b(j) = (a(j+1)-a(j))/h(j) - h(j)*(c(j+1)+2.0_dp*c(j))/3.0_dp
+            d(j) = (c(j+1)-c(j))/(3.0_dp*h(j))
+         end do
+
+         ! Step 3: Interpolate y_new at x_new
+         do k = 1, n_new
+            ! Find the interval
+            j = 1
+            do i = 1, n-1
+               if (x_new(k) >= x(i) .and. x_new(k) <= x(i+1)) then
+                  j = i
+                  exit
+               end if
+            end do
+
+            y_new(k) = a(j) + b(j)*(x_new(k)-x(j)) + c(j)*(x_new(k)-x(j))**2 + d(j)*(x_new(k)-x(j))**3
+         end do
+
+         ! Deallocate
+         deallocate(a,b,c,d,h,alpha,l,mu,z)
+      end subroutine cubic_spline
+
+
+
+
+      ! subroutine is modified to cap the outer energy injection radius at the outer envelope of star
       subroutine find_azone_r1r2(array, a_in, r1_out, r2_out, index_out, rzones_out, nr_out)
          implicit none
          real(dp), intent(in) :: array(:)
@@ -275,7 +546,7 @@
 
          if (prescription == 1) then
             r1_out = array(index_out) - Ra(index_out)       !cm
-            r2_out = array(index_out) + Ra(index_out)       !cm
+            r2_out = min(array(index_out) + Ra(index_out), array(1))      !cm
          else if (prescription == 2) then
             r1_out = array(index_out) - Ra_br       !cm
             r2_out = array(index_out) + Ra_br       !cm
@@ -290,7 +561,87 @@
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
-      subroutine holgado_prescription(id, ierr, M, a_out)
+      subroutine other_cgrav(id, ierr)  ! cannot have any extra arguments in the call
+         !star variables
+         integer, intent(in) :: id
+         integer, intent(out) :: ierr
+         type (star_info), pointer :: s
+
+         ! subroutine variables
+         integer :: k , azone_temp
+
+         !calling star pointer
+         ierr = 0
+         call star_ptr(id, s, ierr)
+         if (ierr /= 0) return
+         
+
+         call find_zone(s%R(1:s%nz), s%xtra(a_curr), azone_temp)
+
+         if (s%x_ctrl(20) == 0) then ! companion's gravitational effect disabled
+            do k = 1, s%nz
+               s%cgrav(k) = standard_cgrav
+            end do
+            
+               
+         else if (s%x_ctrl(20) == 1) then  ! companion's gravitational effect enabled
+            do k = 1, s%nz
+               if (k <= azone_temp) then   
+                  s%cgrav(k) = standard_cgrav * (1.0 + s%xtra(M_ns_curr)/s%m(k))
+               else
+                  s%cgrav(k) = standard_cgrav  
+               end if
+            end do
+         end if
+
+         call write_cgrav_profile(s)   
+
+      end subroutine other_cgrav
+
+
+      ! writes profiles for cgrav, to see if the values are correct
+      subroutine write_cgrav_profile(s)
+         use star_def, only: star_info
+         use const_def, only: dp, standard_cgrav
+         implicit none
+
+         type (star_info), pointer :: s
+
+
+         integer :: k, iounit
+         logical :: dir_exists
+         character(len=256) :: fname, dirname
+         real(dp) :: factor
+
+         if (s%model_number < 1 .or. s%nz <= 0) return
+
+         ! directory for output (inside work/)
+         dirname =  'cgrav_profiles'
+
+         ! Check if directory exists; if not, create it via execute_command_line
+         inquire(file=trim(dirname), exist=dir_exists)
+         if (.not. dir_exists) call execute_command_line('mkdir -p ' // trim(dirname))
+         
+         ! create a unique file name for each model
+         write(fname, '(A,I6.6,A)') 'cgrav_profiles/cgrav_profile_', s%model_number, '.dat'
+
+         open(newunit=iounit, file=fname, status='replace', action='write', form='formatted')
+         write(iounit,'(A)') 'k   radius(cm)   mass(g)   factor(1+M2/Mr)   cgrav(cgs)   standard_cgrav    M   g_analytic'
+
+         do k = 1, s%nz
+            factor = 1 + s%xtra(M_ns_curr)/s%m(k)
+            write(iounit,'(I5,1X,7(1PE14.6,1X))') k, s%r(k), s%m(k), factor, s%cgrav(k), standard_cgrav, s%xtra(M_ns_curr), 1.0_dp + s%xtra(M_ns_curr)/s%m(k)
+         end do
+
+         close(iounit)
+
+         
+      end subroutine write_cgrav_profile
+
+
+
+      ! both updates to a file and prints relevant variables to the output log
+      subroutine holgado_prescription(id, ierr, M, a_in, a_out)
          !star variables
          integer, intent(in) :: id
          integer, intent(out) :: ierr
@@ -298,21 +649,40 @@
 
          !subroutine variables
          integer :: k
+         integer :: my_unit
          real(dp), intent(in) :: M
          real(dp), intent(out) :: a_out
+         integer :: azone_temp
+         real(dp), intent(in) :: a_in
+         integer :: filesize
+         logical :: file_exists
 
          !calling star pointer
          ierr = 0
          call star_ptr(id, s, ierr)
          if (ierr /= 0) return
 
+
+         ! Check if file exists and its size
+         inquire(file='dEorb.data', exist=file_exists, size=filesize)
+
+         ! open the file in append mode
+         open(newunit=my_unit, file='dEorb.data', status='unknown', action='write', position='append')
+         
+         if (.not. file_exists .or. filesize == 0) then
+            write(my_unit,'(a)') 'model   zone        R(cm)            m/R          4πR²ρ        dEorb           m               rho                 f(k)         fd_arr(k)       v(k)         Eorb          M'
+         end if
+
+         !printing dEorb and f(k) at the zone of the orbit 
+         call find_zone(s%R(1:s%nz), a_in, azone_temp)
+
          !mass is in g, radius is in cm, time is in s
 
          do k = 1, s%nz
-            v(k) = SQRT(standard_cgrav*(M + s%m(k))/s%R(k))   !cm/s
+            v(k) = SQRT(s%cgrav(k)*(M + s%m(k))/s%R(k))   !cm/s
          end do
 
-         call hl_and_energy(id, ierr, M)            !all cgs
+         call hl_and_energy(id, ierr, M, s%xtra(a_curr), a_next)            !all cgs
          call mr15(id, ierr)                        !all cgs
          call edd_and_hyper(id, ierr, M)            !all cgs
 
@@ -324,12 +694,242 @@
             end if
             fd_arr(k) = eta*fd_mr15(k)              !dyne (g cm s^-2)
             edot(k) = fd_arr(k)*v(k)                !erg/s
-            f(k) = -fd_arr(k)*v(k)*(1/dEorb(k))     !s^-1
+            f(k) = - fd_arr(k)*v(k)*1/dEorb(k)     !cm s^-1(da/dt)
+         
+            
+            if (k == azone_temp) then
+               write(my_unit,'(i6,1x,i6,1x,12(3x,es12.4))') &
+                  s%model_number, k, s%R(k), s%m(k)/s%R(k), &
+                  4.0_dp*pi*s%R(k)**2*s%rho_face(k), dEorb(k), s%m(k), s%rho_face(k), f(k), fd_arr(k), v(k), Eorb(k), M 
+            end if
+
+            if (k == azone_temp) then
+               ! writing in output log
+               write(*,'(" Zone=",I6," R=",ES12.4," f(k)=",ES12.4," v=",ES12.4," fd=",ES12.4," dEorb=",ES12.4," m=",ES12.4," rho on boundary=",ES12.4," problematic_value=",ES12.4, "  M=",ES12.4)') &
+               k, s%R(k), f(k), v(k), fd_arr(k), dEorb(k), s%m(k), s%rho_face(k), (s%m(k)/s%R(k)) - 4*pi*(s%R(k)**2)*s%rho_face(k), M
+            end if
+
          end do
 
+         close(my_unit)
+
          call rk4(id, ierr, s%xtra(a_curr), s%time, s%dt_next, a_out)  !cm
+         !call integrate_orbit_adaptive2(id, ierr, s%xtra(a_curr), s%time, s%dt_next, a_out)
 
       end subroutine holgado_prescription
+
+
+      subroutine smooth_orbital_evolution_function_holgado(id, ierr, t, a_in, fa, R_smooth, f_smooth, n_smooth) 
+         !star variables
+         integer, intent(in) :: id
+         integer, intent(out) :: ierr
+         type (star_info), pointer :: s
+         
+         !subroutine variables
+         real(dp), intent(in) :: a_in, t
+         real(dp), intent(out) :: fa
+         integer :: k, current_zone
+         real(dp), intent(in) :: R_smooth(:), f_smooth(:)
+         integer, intent(in) :: n_smooth
+         
+         !calling star pointer
+         ierr = 0
+         call star_ptr(id, s, ierr)
+         if (ierr /= 0) return 
+         
+         ! print *, 'orbital evolution function called'
+
+         !finding the zone where the function is to be evaluated
+         call find_zone(R_smooth(1:n_smooth), a_in, current_zone)  ! current_zone is on the smoother grid, used to not confuse
+
+         !evaluating the function
+         fa = f_smooth(current_zone)
+
+      end subroutine smooth_orbital_evolution_function_holgado
+
+
+      subroutine smooth_profile_holgado(id, ierr, M, a_in, a_out)
+         !star variables
+         integer, intent(in) :: id
+         integer, intent(out) :: ierr
+
+         !subroutine inputs and outputs
+         real(dp), intent(in)  :: M       
+         real(dp), intent(in)  :: a_in    
+         real(dp), intent(out) :: a_out   
+
+         ! Star pointer
+         type(star_info), pointer :: s
+
+         ! subroutine local variables
+         integer :: k,i, p, q, rs_idx
+         integer :: s_nz, n_smooth, this_zone
+         real(dp), allocatable :: R_increasing(:), rho_increasing(:), m_increasing(:), h_increasing(:)
+         real(dp):: da_dt, step
+         real(dp) :: f1,f2,f3
+         integer :: my_unit
+         logical :: file_exists
+         integer :: filesize
+         integer :: n_refine
+
+         ! variables of writing interpolated quantities into file
+         integer :: prof_unit
+         character(len=128) :: prof_name
+         integer :: model_no
+         character(len=20) :: temp_model, temp_nsmooth
+         character(len=256) :: folder_name
+         folder_name = 'smooth_profiles/'   ! my subfolder where i want the smoothed files to go to
+
+         ! assigning the star pointer
+         ierr = 0
+         call star_ptr(id, s, ierr)
+         if (ierr /= 0) return
+
+
+         model_no = s%model_number
+         write(prof_name,'(A,I5.5,A)') trim(folder_name)//'smooth_profile', model_no, '.data'
+
+         allocate(R_increasing(s%nz))
+         allocate(rho_increasing(s%nz))
+         allocate(m_increasing(s%nz))
+         allocate(h_increasing(s%nz))
+
+         s_nz = s%nz
+         f1 = 1.91791946
+         f2 = -1.52814698
+         f3 = 0.75992092
+         
+         ! number of points in new grid
+         n_refine = 10
+         n_smooth = (s%nz-1)*n_refine + 1
+         
+
+         ! Check if file exists and its size
+         inquire(file='dEorb.data', exist=file_exists, size=filesize)
+
+         ! open the file in append mode
+         open(newunit=my_unit, file='dEorb.data', status='unknown', action='write', position='append')
+         
+         if (.not. file_exists .or. filesize == 0) then
+            write(my_unit,'(a)') 'model   zone        R(cm)            m/R          4πR²ρ        dEorb           m               rho                 f(k)         fd_arr(k)       v(k)'
+         end if
+
+
+         open(newunit=prof_unit, file=trim(prof_name), status='replace', action='write')
+
+         write(temp_model,'(i0)') model_no
+         write(temp_nsmooth,'(i0)') n_smooth
+
+         ! Write header to file
+         write(prof_unit,'(a)') '# smooth_profile_holgado output'
+         write(prof_unit,'(a)') '# model_number = '//trim(temp_model)
+         write(prof_unit,'(a)') '# n_smooth = '//trim(temp_nsmooth)
+         write(prof_unit,'(a)') '# Columns: zone R(cm) rho(g/cm^3) m(g) scale_height(cm) v(cm/s) fd dyn dEorb f'
+         
+
+         ! this array is increasing, R_smooth(1)= R(s_nz) and R_smooth(s_nz) = R(1)
+         ! 1 to s_nz, radius is increasing
+         ! inserts 9 points inside each interval, divides each interval by 10
+         rs_idx = 1
+         do p = s%nz, 2, -1
+            step = (s%R(p-1) - s%R(p)) / n_refine
+            do q = 0, n_refine - 1
+               R_smooth(rs_idx) = s%R(p) + q*step
+               rs_idx = rs_idx + 1
+            end do
+         end do
+         R_smooth(rs_idx) = s%R(1)  ! last point = surface
+         
+
+         do i = 1, s%nz
+            R_increasing(i)   = s%R(s%nz - i + 1)        ! now R_increasing(1) = center
+            rho_increasing(i) = s%rho_face(s%nz - i + 1)
+            m_increasing(i)   = s%m(s%nz - i + 1)
+            h_increasing(i)   = s%scale_height(s%nz - i + 1)
+         end do
+
+
+         ! reverse the array while interpolating so that radius always increases(inside to outside)
+
+         !Interpolate density on the new grid as a function of radius(using rho_face instead of rho)
+         ! cubic spline is breaking
+         call cubic_spline(R_increasing(1:s%nz), rho_increasing(1:s%nz), s_nz, R_smooth, rho_boundary_smooth, n_smooth)
+
+         ! interpolate mass also on the smoother grid(questionable??)  
+         call cubic_spline(R_increasing(1:s%nz), m_increasing(1:s%nz), s_nz, R_smooth, m_smooth, n_smooth)
+
+         !interpolate scale_height( scale height probably uses rho, not rho_face, option: calculate the values in the boundary and store them in an array and pass them here)
+         call cubic_spline(R_increasing(1:s%nz), h_increasing(1:s%nz), s_nz, R_smooth, scale_height_smooth, n_smooth)
+
+         ! now reverse all of the smooth arrays to match the original mesa ordering
+         R_smooth = R_smooth(n_smooth:1:-1)
+         rho_boundary_smooth = rho_boundary_smooth(n_smooth:1:-1)
+         m_smooth = m_smooth(n_smooth:1:-1)
+         scale_height_smooth = scale_height_smooth(n_smooth:1:-1)
+
+         !compute velocity on this new grid using mass and radius
+         do k= 1, n_smooth
+            v_smooth(k) = SQRT(s%cgrav(k)*(M + m_smooth(k))/( R_smooth(k)))
+         end do
+
+
+
+         !comptuting necessary values for calculating drag force and dEorb  
+         !every formula is same as original, only on a new grid
+
+         
+         do k = 1, n_smooth
+            Ra_smooth(k) = (2*s%cgrav(k)*M)/(v_smooth(k)**2)
+            eps_rho_smooth(k) = Ra_smooth(k)/(scale_height_smooth(k))
+            mr15_ratio_smooth(k)= f1 + f2*eps_rho_smooth(k) + f3*(eps_rho_smooth(k)**2)
+            mdot_hl_smooth(k) = pi*(Ra_smooth(k)**2)*rho_boundary_smooth(k)*v_smooth(k)
+            fd_hl_smooth(k) = mdot_hl_smooth(k)*v_smooth(k)
+            fd_mr15_smooth(k) = mr15_ratio_smooth(k)*fd_hl_smooth(k)
+            fd_array_smooth(k) = eta*fd_mr15_smooth(k)
+            edot_smooth(k) = fd_array_smooth(k)*v_smooth(k)
+            dEorb_smooth(k) = ((s%cgrav(k)*M)/(2*R_smooth(k))) * ((m_smooth(k)/R_smooth(k)) - 4*pi*(R_smooth(k)**2)*rho_boundary_smooth(k))
+            f_smooth(k) = - ((fd_array_smooth(k)*v_smooth(k))/(dEorb_smooth(k)))
+         end do
+
+         !printing dEorb and f(k) at the zone of the orbit 
+         call find_zone(R_smooth(1:n_smooth), a_in, this_zone)
+
+         do k=1,n_smooth
+            if (k == this_zone) then
+               write(my_unit,'(i6,1x,i6,1x,10(3x,es12.4))') &
+                  s%model_number, this_zone, R_smooth(k), m_smooth(k)/R_smooth(k), &
+                  4.0_dp*pi*R_smooth(k)**2*rho_boundary_smooth(k), dEorb_smooth(k), m_smooth(k), rho_boundary_smooth(k), f_smooth(k), fd_array_smooth(k), v_smooth(k)
+            end if
+
+            if (k == this_zone) then
+               ! writing in output log
+               write(*,'(" Zone=",I6," R=",ES12.4," f(k)=",ES12.4," v=",ES12.4," fd=",ES12.4," dEorb=",ES12.4," m=",ES12.4," rho=",ES12.4," problematic_value=",ES12.4)') &
+               k, R_smooth(k), f_smooth(k), v_smooth(k), fd_array_smooth(k), dEorb_smooth(k), m_smooth(k), rho_boundary_smooth(k), m_smooth(k)/R_smooth(k) - 4*pi*(R_smooth(k)**2)*rho_boundary_smooth(k)
+            end if
+         end do
+
+         ! loop over all zones to write the data in the smooth profile file
+         do k = 1, n_smooth
+            write(prof_unit,'(i8,1x,9(es20.10))') k, &
+            R_smooth(k), &
+            rho_boundary_smooth(k), &
+            m_smooth(k), &
+            scale_height_smooth(k), &
+            v_smooth(k), &
+            fd_array_smooth(k), &
+            dEorb_smooth(k), &
+            f_smooth(k)
+         end do
+
+         close(prof_unit)
+
+         close(my_unit)
+
+         !advance orbit
+         call rk4_small_step(id, ierr, s%xtra(a_curr), s%time, s%dt_next, a_out, R_smooth, f_smooth, n_smooth, v_smooth, fd_array_smooth, dEorb_smooth, m_smooth, rho_boundary_smooth)
+
+      end subroutine smooth_profile_holgado
+
 
       subroutine bronner_prescription(id, ierr, M, a_out)
          !star variables
@@ -348,6 +948,7 @@
          call star_ptr(id, s, ierr)
          if (ierr /= 0) return
 
+         ! this is just parameters for mr15 part?? eventho its meant to be given by the kim2010
          f1 = 1.91791946
          f2 = -1.52814698
          f3 = 0.75992092
@@ -366,7 +967,7 @@
             v_rel = SQRT( (s%xtra(c2_curr) - s%xtra(a2_curr) + (s%xtra(omega_env)*(s%xtra(d1_curr) - s%xtra(b1_curr))) - (s%u(azone)*(s%xtra(c1_curr) - s%xtra(a1_curr)))/a_in )**2 + (s%xtra(d2_curr) - s%xtra(b2_curr) - (s%xtra(omega_env)*(s%xtra(c1_curr) - s%xtra(a1_curr))) - (s%u(azone)*(s%xtra(d1_curr) - s%xtra(b1_curr)))/a_in )**2 )
          end if
 
-         Ra_br = 2*standard_cgrav*M/(v_rel**2)                 !cm
+         Ra_br = 2*s% cgrav(azone_temp)*M/(v_rel**2)                 !cm  !different than the one in bronner
          mdot_hl_br = pi*(Ra_br**2)*(s%rho(azone_temp))*v_rel           !g/s
          fd_hl_br = mdot_hl_br*v_rel                           !dyne (g cm s^-2)
          eps_rho_br = Ra_br/s%scale_height(azone_temp)                                                !dimensionless
@@ -387,7 +988,7 @@
 
          call kim2010(id, ierr, mach_br, a_in, Ra_br, azone_temp, v_rel, M, fd_br)  !all cgs
 
-         edot_br = fd_br*v_rel                !erg/s
+         edot_br = fd_br*v_rel                !erg/s  ! already negative
 
          call orbital_evolution_bronner(id, ierr, s%time, s%dt_next, a_in, azone_temp, fd_br, s%xtra(omega_env), M, v_rel, a_out)  !cm
       end subroutine bronner_prescription
@@ -402,6 +1003,7 @@
          real(dp), intent(in) :: t, dt, a_in, fd_in, omega_in, M_in, v_in
          integer, intent(in) :: azone_in
          real(dp), intent(out) :: a_out
+         integer :: azone_temp
 
          !calling star pointer
          ierr = 0
@@ -413,14 +1015,16 @@
          c1_next = s%xtra(c1_curr) + s%xtra(c2_curr)*dt
          d1_next = s%xtra(d1_curr) + s%xtra(d2_curr)*dt
 
-         a2_next = a2_curr + dt*(standard_cgrav*s%xtra(M_ns_curr)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3))
-         b2_next = b2_curr + dt*(standard_cgrav*s%xtra(M_ns_curr)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3))
+         call find_zone(s%R(1:s%nz), a_in, azone_temp)
+
+         a2_next = a2_curr + dt*(s%cgrav(azone_temp)*s%xtra(M_ns_curr)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3))
+         b2_next = b2_curr + dt*(s%cgrav(azone_temp)*s%xtra(M_ns_curr)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3))
          if (a_in > 100*Rsun) then
-            c2_next = c2_curr + dt*(standard_cgrav*s%m(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3) + fd_in*(s%xtra(c2_curr) - s%xtra(a2_curr) + omega_in*(s%xtra(d1_curr) - s%xtra(b1_curr)))/(M_in*v_in))
-            d2_next = d2_curr + dt*(standard_cgrav*s%m(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3) + fd_in*(s%xtra(d2_curr) - s%xtra(b2_curr) - omega_in*(s%xtra(c1_curr) - s%xtra(a1_curr)))/(M_in*v_in))
+            c2_next = c2_curr + dt*(s%cgrav(azone_temp)*s%m(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3) + fd_in*(s%xtra(c2_curr) - s%xtra(a2_curr) + omega_in*(s%xtra(d1_curr) - s%xtra(b1_curr)))/(M_in*v_in))
+            d2_next = d2_curr + dt*(s%cgrav(azone_temp)*s%m(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3) + fd_in*(s%xtra(d2_curr) - s%xtra(b2_curr) - omega_in*(s%xtra(c1_curr) - s%xtra(a1_curr)))/(M_in*v_in))
          else
-            c2_next = c2_curr + dt*(standard_cgrav*s%m(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3) + fd_in*(s%xtra(c2_curr) - s%xtra(a2_curr) + omega_in*(s%xtra(d1_curr) - s%xtra(b1_curr)) - (s%u(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr)))/a_in)/(M_in*v_in))
-            d2_next = d2_curr + dt*(standard_cgrav*s%m(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3) + fd_in*(s%xtra(d2_curr) - s%xtra(b2_curr) - omega_in*(s%xtra(c1_curr) - s%xtra(a1_curr)) - (s%u(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr)))/a_in)/(M_in*v_in))
+            c2_next = c2_curr + dt*(s%cgrav(azone_temp)*s%m(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr))/(a_in**3) + fd_in*(s%xtra(c2_curr) - s%xtra(a2_curr) + omega_in*(s%xtra(d1_curr) - s%xtra(b1_curr)) - (s%u(azone_in)*(s%xtra(c1_curr) - s%xtra(a1_curr)))/a_in)/(M_in*v_in))
+            d2_next = d2_curr + dt*(s%cgrav(azone_temp)*s%m(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr))/(a_in**3) + fd_in*(s%xtra(d2_curr) - s%xtra(b2_curr) - omega_in*(s%xtra(c1_curr) - s%xtra(a1_curr)) - (s%u(azone_in)*(s%xtra(d1_curr) - s%xtra(b1_curr)))/a_in)/(M_in*v_in))
          end if
 
          a_out = SQRT( (a1_next - c1_next)**2 + (b1_next - d1_next)**2 )
@@ -439,13 +1043,16 @@
          integer, intent(in) :: azone_in
          real(dp), intent(out) :: fd_out
          real(dp) :: i_var, beta, eta_b, cd
+         integer :: azone_temp
 
          !calling star pointer
          ierr = 0
          call star_ptr(id, s, ierr)
          if (ierr /= 0) return
 
-         beta = standard_cgrav*M_in/(a_in*s%csound(azone_in)**2)   !dimensionless
+         call find_zone(s%R(1:s%nz), a_in, azone_temp)
+
+         beta = s%cgrav(azone_temp)*M_in/(a_in*s%csound(azone_in)**2)   !dimensionless
          eta_b = beta/(mach_in**2 - 1)                          !dimensionless
          cd = 0.002
 
@@ -458,39 +1065,63 @@
          end if
 
          if (eta_b > 0.1 .and. mach_in > 1.01) then
-            fd_out = -cd*0.7*4*pi*s%rho(azone_in)*(1 + 0.46*(beta**1.1)/(mach_in**2 - 1)**0.11)*(standard_cgrav*(M_in**2))/((v_in**2)*(eta_b**0.5))
+            fd_out = -cd*0.7*4*pi*s%rho(azone_in)*(1 + 0.46*(beta**1.1)/(mach_in**2 - 1)**0.11)*(s%cgrav(azone_temp)*(M_in**2))/((v_in**2)*(eta_b**0.5))
          else
-            fd_out = -cd*4*pi*s%rho(azone_in)*(standard_cgrav*(M_in**2))*i_var/(v_in**2)
+            fd_out = -cd*4*pi*s%rho(azone_in)*(s%cgrav(azone_temp)*(M_in**2))*i_var/(v_in**2)
          end if
       end subroutine kim2010
 
-      subroutine hl_and_energy(id, ierr, M)
-         !star variables
+      subroutine hl_and_energy(id, ierr, M, a_in, a_out)
+         ! star variables
          integer, intent(in) :: id
          integer, intent(out) :: ierr
          type (star_info), pointer :: s
 
-         !subroutine variables
+         ! subroutine variables
          integer :: k
+         integer :: j
+         real(dp) :: dm, r_minus, r_plus, dEdr_minus, dEdr_plus
          real(dp), intent(in) :: M
+         integer :: azone_temp
+         real(dp), intent(in) :: a_in
+         real(dp), intent(out) :: a_out
+         real(dp), allocatable :: E_outer_sum(:)
 
-         !calling star pointer
          ierr = 0
          call star_ptr(id, s, ierr)
          if (ierr /= 0) return
 
-         !mass is in g, radius is in cm, time is in s
+         allocate(E_outer_sum(s%nz))
+
+
+         call find_zone(s%R(1:s%nz), a_in, azone_temp)
+
+         ! mass is in g, radius is in cm, time is in s
          do k = 1, s% nz
-            Ra(k) = 2*standard_cgrav*M/(v(k)**2)                 !cm
-            mdot_hl(k) = pi*(Ra(k)**2)*(s%rho(k))*v(k)           !g/s
+            Ra(k) = 2*s%cgrav(k)*M/(v(k)**2)                 !cm
+            mdot_hl(k) = pi*(Ra(k)**2)*(s%rho_face(k))*v(k)           !g/s
             fd_hl(k) = mdot_hl(k)*v(k)                           !dyne (g cm s^-2)
             edot_hl(k) = fd_hl(k)*v(k)                           !erg/s
-            
-            Eorb(k) = standard_cgrav*M*(s%m(k))/(2*s%R(k))                                           !erg
-            dEorb(k) = (standard_cgrav*M/(2*s%R(k)))*((s%m(k)/s%R(k)) - 4*pi*(s%R(k)**2)*s%rho(k))   !erg/cm
          end do
 
+         E_outer_sum(1) = 0.0d0
+         do j = 2, s%nz
+            dm = s%m(j-1) - s%m(j)   ! positive shell mass
+            E_outer_sum(j) = E_outer_sum(j-1) + dm / s%R(j-1)
+         end do
+
+         ! compute total orbital energy including outer shell contribution
+         do k = 1, s%nz
+            Eorb(k) =  s%cgrav(k)*M*(s%m(k))/(2.0d0*s%R(k))
+            Eorb(k) =  Eorb(k) + s%cgrav(k)*M*E_outer_sum(k)  ! erg
+         end do
+
+         do k = 1, s%nz
+            dEorb(k) = (s%cgrav(k)*M/(2*s%R(k)))*((s%m(k)/s%R(k)) + 4*pi*(s%R(k)**2)*s%rho_face(k)) 
+         end do
+         
       end subroutine hl_and_energy
+
 
       subroutine mr15(id, ierr)
          !star variables
@@ -516,7 +1147,7 @@
          mu3 = 1.19007536
          mu4 = 1.05762477
 
-         do k = 1, s% nz
+         do k = 1, s%nz
             eps_rho(k) = Ra(k)/s%scale_height(k)                                                !dimensionless
             fd_mr15_ratio(k) = f1 + f2*eps_rho(k) + f3*(eps_rho(k)**2)                          !dimensionless
             mdot_mr15_ratio(k) = (10)**(mu1 + mu2/(1 + mu3*eps_rho(k) + mu4*(eps_rho(k)**2)))   !dimensionless
@@ -571,7 +1202,7 @@
             else
                fd_arr(k) = LOG(s%R(k) / (R0*(0.11*mach(k) + 1.65)))
             end if
-            fd_arr(k) = fd_arr(k)*(4*pi*s%rho(k)*((standard_cgrav*M)**2)/(v(k)**2))
+            fd_arr(k) = fd_arr(k)*(4*pi*s%rho(k)*((s%cgrav(k)*M)**2)/(v(k)**2))
          end do
       end subroutine kim2007
 
@@ -661,7 +1292,7 @@
 
          ebind_out = 0
          do i = 1, zone_in
-            ebind_out = ebind_out + (s%energy(i) - standard_cgrav*s%m(i)/s%R(i))*s%dm(i)
+            ebind_out = ebind_out + (s%energy(i) - s%cgrav(i)*s%m(i)/s%R(i))*s%dm(i)
          end do
          eorb_change_out = Eorb(zone_in) - Eorb(1)
 
@@ -678,23 +1309,26 @@
       end subroutine Req_and_beta
 
       !DONE: To evaluate the omega function and solve for the inverse
-      subroutine omega_function(e1, M, omega1)
+      subroutine omega_function(e1, M, omega1, cgrav)
          !subroutine variables
          real(dp), intent(in) :: e1, M
+         real(dp), intent(in) :: cgrav
          real(dp), intent(out) :: omega1
          real(dp) :: rho_bar, qn
 
          rho_bar = 3*M/(4*pi*(R0**3))      !gm/cm^3
          qn = (1-n_poly/5)                 !dimensionless
+
          
-         omega1 = sqrt(2*pi*standard_cgrav*rho_bar*( (sqrt(1-e1**2)*(3-2*e1**2)*asin(e1)/(e1**3)) - 3*(1-e1**2)/(e1**2) )/qn) !Hz
+         omega1 = sqrt(2*pi*cgrav*rho_bar*( (sqrt(1-e1**2)*(3-2*e1**2)*asin(e1)/(e1**3)) - 3*(1-e1**2)/(e1**2) )/qn) !Hz
       end subroutine omega_function
 
       !DONE: To solve for the inverse of the omega function
-      subroutine omega_func_solve_inverse(e_in, omega_val, tol, M, e_out)
+      subroutine omega_func_solve_inverse(e_in, omega_val, tol, M, e_out, cgrav)
          !subroutine variables
          real(dp), intent(in) :: e_in, omega_val, tol, M
          real(dp), intent(out) :: e_out
+         real(dp), intent(in) :: cgrav
 
          !local variables
          real(dp) :: e1, omega1
@@ -703,11 +1337,11 @@
          iterations = 0
 
          e1 = e_in !dimensionless
-         call omega_function(e1, M, omega1)
+         call omega_function(e1, M, omega1, cgrav)
 
          do while (abs(omega1 - omega_val) >= tol .and. iterations < 100)
             e1 = e1*omega_val/omega1
-            call omega_function(e1, M, omega1)
+            call omega_function(e1, M, omega1, cgrav)
             iterations = iterations + 1
          end do
 
@@ -715,15 +1349,16 @@
       end subroutine omega_func_solve_inverse
 
       !DONE: to evaluate the spin evolution and quadrupole moment evolution
-      subroutine omega_and_q(id, ierr, M, omega_function)
+      subroutine omega_and_q(id, ierr, M, omega_function , cgrav)
          !star variables
          integer, intent(in) :: id
          integer, intent(out) :: ierr
          type (star_info), pointer :: s
 
          !subroutine variables
-         real(dp), intent(in) :: M, omega_function
+         real(dp), intent(in) :: M, omega_function, cgrav
          integer :: i
+
 
          !calling star pointer
          ierr = 0
@@ -737,14 +1372,14 @@
             call forward_euler(s%xtra(omega_curr), omega_function, 0d0, omega_next)          !Hz
          end if
 
-         call omega_func_solve_inverse(s%xtra(e_curr), omega_next, 1d-9, M, e_next)
+         call omega_func_solve_inverse(s%xtra(e_curr), omega_next, 1d-9, M, e_next, cgrav)
 
          aa_next = R0*(1 + e_next/2)                        !cm
          bb_next = R0*(1 - e_next/2)                        !cm
          mom_inert_next = M*(aa_next**2 + bb_next**2)/5     !gm cm^2
 
          call Req_and_beta(e_next, Req, Rbar, beta)
-         Qtb_next = sqrt((5*(clight**5)*mdot*sqrt(standard_cgrav*M*Req))/(32*standard_cgrav*(omega_next**5))) !g cm^2
+         Qtb_next = sqrt((5*(clight**5)*mdot*sqrt(cgrav*M*Req))/(32*cgrav*(omega_next**5))) !g cm^2
          if (Qtb_next > Qmax_next) then
             Q_next = Qmax_next*exp(-1*s%time*mdot/M_crust)   !g cm^2
             decay_coeff = exp(-1*s%time*mdot/M_crust)        !dimensionless
@@ -763,7 +1398,8 @@
          !subroutine variables
          real(dp) :: temp, temp_heat
          integer, allocatable :: rzones(:)
-         integer :: i, j, nr, azone_temp
+         integer :: i, j, nr, azone_temp, zone_curr
+         integer :: n_smooth, n_refine
 
          !calling star pointer
          ierr = 0
@@ -773,6 +1409,9 @@
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
          ! INITIALISING AND ALLOCATING
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+         n_refine = 10
+         n_smooth = (s%nz-1)*n_refine + 1
          
          s%x_ctrl(14) = s%model_number
 
@@ -797,14 +1436,20 @@
             deallocate(mdot_hl, fd_hl, edot_hl, v, Ra, Eorb, dEorb)
             deallocate(mdot_mr15, fd_mr15, mdot_mr15_ratio, fd_mr15_ratio, eps_rho)
             deallocate(mdot_edd, mdot_hyper)!, omega_arr, e_arr, beta_arr)!, rand)
+            deallocate(R_smooth, m_smooth, rho_boundary_smooth ,scale_height_smooth, v_smooth)
+            deallocate(Ra_smooth, eps_rho_smooth, mr15_ratio_smooth, mdot_hl_smooth, fd_hl_smooth)
+            deallocate(fd_mr15_smooth, fd_array_smooth, dEorb_smooth, f_smooth, edot_smooth)
          end if
          allocate(fd_arr(s%nz), mdot_arr(s%nz), f(s%nz), edot(s%nz))
          allocate(mdot_hl(s% nz), fd_hl(s% nz), edot_hl(s% nz), v(s% nz), Ra(s% nz), Eorb(s%nz), dEorb(s%nz))
          allocate(mdot_mr15(s%nz), fd_mr15(s%nz), mdot_mr15_ratio(s%nz), fd_mr15_ratio(s%nz), eps_rho(s%nz))
          allocate(mdot_edd(s%nz), mdot_hyper(s%nz))
+         allocate(R_smooth(n_smooth), m_smooth(n_smooth), rho_boundary_smooth(n_smooth),scale_height_smooth(n_smooth), v_smooth(n_smooth))
+         allocate(Ra_smooth(n_smooth), eps_rho_smooth(n_smooth), mr15_ratio_smooth(n_smooth), mdot_hl_smooth(n_smooth), fd_hl_smooth(n_smooth))
+         allocate(fd_mr15_smooth(n_smooth), fd_array_smooth(n_smooth), dEorb_smooth(n_smooth), f_smooth(n_smooth), edot_smooth(n_smooth))
 
          if (s%model_number == 1) then
-            s%xtra(a_curr) = 290*Rsun !9.8d-1*s%R(1)          !cm
+            s%xtra(a_curr) = 48*Rsun !9.8d-1*s%R(1)          !cm
             s%xtra(M_ns_curr) = M_ns_initial                  !gm
             s%xtra(M_acc_curr) = 0                            !gm   
             s%xtra(omega_curr) = omega_initial                !spin frequency (Hz)
@@ -813,9 +1458,10 @@
             s%xtra(aa_curr) = R0*(1+s%xtra(e_curr)/2)                 !cm
             s%xtra(bb_curr) = R0*(1-s%xtra(e_curr)/2)                 !cm
             s%xtra(mom_inert_curr) = s%xtra(M_ns_curr)*(s%xtra(aa_curr)**2 + s%xtra(bb_curr)**2)/5                 !gm cm^2
+            
             call find_zone(s%R(1:s%nz), s%xtra(a_curr), azone_temp)
  
-            s%xtra(omega_env) = omega_env_factor*SQRT(standard_cgrav*(s%xtra(M_ns_curr) + s%m(azone_temp))/(s%R(azone_temp)**3))
+            s%xtra(omega_env) = omega_env_factor*SQRT(s%cgrav(azone_temp)*(s%xtra(M_ns_curr) + s%m(azone_temp))/(s%R(azone_temp)**3))
             if (prescription == 2) then
                s%xtra(a1_curr) = 0
                s%xtra(b1_curr) = 0
@@ -824,7 +1470,7 @@
                s%xtra(a2_curr) = 0
                s%xtra(b2_curr) = 0
                s%xtra(c2_curr) = 0
-               s%xtra(d2_curr) = SQRT(standard_cgrav*(s%xtra(M_ns_curr) + s%m(azone_temp))/s%R(azone_temp))
+               s%xtra(d2_curr) = SQRT(s%cgrav(azone_temp)*(s%xtra(M_ns_curr) + s%m(azone_temp))/s%R(azone_temp))
             end if
             s%x_ctrl(15) = 2
          end if
@@ -834,8 +1480,12 @@
          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
          !doing the orbital evolution
-         if (prescription == 1) then
-            call holgado_prescription(id, ierr, s%xtra(M_ns_curr), a_next)
+         if (prescription == 1) then  
+            if (s%x_ctrl(19) == 1) then                         ! smoothing turned on
+               call smooth_profile_holgado(id, ierr, s%xtra(M_ns_curr), s%xtra(a_curr), a_next)
+            else if (s%x_ctrl(19) == 0) then                    ! smothing disabled, call normal holgado_prescription
+               call holgado_prescription(id, ierr, s%xtra(M_ns_curr), s%xtra(a_curr), a_next)
+            end if
          else if (prescription == 2) then
             call bronner_prescription(id, ierr, s%xtra(M_ns_curr), a_next)
          end if
@@ -843,25 +1493,44 @@
          !injecting energy into the envelope
          call find_azone_r1r2(s%R(1:s%nz), s%xtra(a_curr), r1, r2, azone, rzones, nr)
          
-         if (prescription == 1) then
-            call energy_injection_bronner(id, ierr, edot(azone), nr, rzones, s%xtra(a_curr), r1, r2)
-            mdot = mdot_arr(azone)  
-         else if (prescription == 2) then
-            call energy_injection_bronner(id, ierr, -edot_br, nr, rzones, s%xtra(a_curr), r1, r2)
-            mdot = mdot_br
+         if (s%x_ctrl(16) == 1) then    !energy injection enabled
+            if (prescription == 1) then
+               call energy_injection_bronner(id, ierr, edot(azone), nr, rzones, s%xtra(a_curr), r1, r2) 
+            else if (prescription == 2) then
+               call energy_injection_bronner(id, ierr, -edot_br, nr, rzones, s%xtra(a_curr), r1, r2)
+            end if
+         else if (s%x_ctrl(16) == 0) then       !energy injection disabled
+            s%extra_heat(:)%val = 0.0d0
          end if
+
 
          !calculating the binding energy of the envelope(not used in evaluating anything else)
          call binding_energy(id, ierr, azone, ebind, eorb_change)                                                 !ergs
 
-         if (s%x_ctrl(14) /= s%x_ctrl(15)) then
-            call forward_euler(s%xtra(M_acc_curr), mdot, s%dt_next, M_acc_next)     !gm
-            call forward_euler(s%xtra(M_ns_curr), mdot, s%dt_next, M_ns_next)       !gm
-         else 
-            call forward_euler(s%xtra(M_acc_curr), mdot, 0d0, M_acc_next)     !gm
-            call forward_euler(s%xtra(M_ns_curr), mdot, 0d0, M_ns_next)       !gm
-         end if
+         ! accretion switch
+         if (s%x_ctrl(18) == 1) then ! accretion on
 
+            if (prescription == 1) then
+               mdot = mdot_arr(azone)
+            else if (prescription == 2) then
+               mdot = mdot_br
+            end if 
+
+            ! update mass here
+            if (s%x_ctrl(14) /= s%x_ctrl(15)) then
+               call forward_euler(s%xtra(M_acc_curr), mdot, s%dt_next, M_acc_next)     !gm
+               call forward_euler(s%xtra(M_ns_curr), mdot, s%dt_next, M_ns_next)       !gm
+            else 
+               call forward_euler(s%xtra(M_acc_curr), mdot, 0d0, M_acc_next)     !gm
+               call forward_euler(s%xtra(M_ns_curr), mdot, 0d0, M_ns_next)       !gm
+            end if
+         else if (s%x_ctrl(18) == 0) then ! accretion disabled
+            mdot = 0d0
+            M_acc_next = s%xtra(M_acc_curr)
+            M_ns_next = s%xtra(M_ns_curr)
+         end if 
+
+         ! to disable gravitational waves, built the switch inside this routine
          call evaluate_strain(id, ierr)
 
          print *, 'model number = ', s% model_number
@@ -929,43 +1598,150 @@
 
          !subroutine variables
          real(dp) :: omega_func_curr
+         integer :: azone_temp
+         real(dp) :: cgrav
 
          !calling star pointer
          ierr = 0
          call star_ptr(id, s, ierr)
          if (ierr /= 0) return
 
-         if (s%model_number == 1) then
-            call Req_and_beta(s%xtra(e_curr), Req, Rbar, beta)
-            omega_next = s%xtra(omega_curr)                             !Hz
-            s%xtra(Qtb_curr) = sqrt((5*(clight**5)*mdot*sqrt(standard_cgrav*s%xtra(M_ns_curr)*Req))/(32*standard_cgrav*((s%xtra(omega_curr))**5))) !g cm^2
-            Qtb_next = s%xtra(Qtb_curr)                                 !g cm^2
-            Qmax_next = s%xtra(Qmax_curr)                               !g cm^2
-            s%xtra(Q_curr) = s%xtra(Qtb_curr)                           !g cm^2
-            Q_next = s%xtra(Q_curr)                                     !g cm^2
-            e_next = s%xtra(e_curr)                                     !dimensionless
-            aa_next = s%xtra(aa_curr)                                   !cm
-            bb_next = s%xtra(bb_curr)                                   !cm
-            mom_inert_next = s%xtra(mom_inert_curr)                     !gm cm^2
+         call find_zone(s%R(1:s%nz), s%xtra(a_curr), azone_temp)
 
-            decay_coeff = 1                                             !dimensionless
+         cgrav = s%cgrav(azone_temp)
 
-            s%xtra(strain_curr) = 2*standard_cgrav*((s%xtra(omega_curr))**2)*(s%xtra(Q_curr))/(D*(clight**4)) !dimensionless
-            strain_next = s%xtra(strain_curr)                            !dimensionless
+         if (s%x_ctrl(17) == 1) then   ! gravitational waves enabled
+            if (s%model_number == 1) then
+               call Req_and_beta(s%xtra(e_curr), Req, Rbar, beta)
+               omega_next = s%xtra(omega_curr)                             !Hz
+               s%xtra(Qtb_curr) = sqrt((5*(clight**5)*mdot*sqrt(cgrav*s%xtra(M_ns_curr)*Req))/(32*cgrav*((s%xtra(omega_curr))**5))) !g cm^2
+               Qtb_next = s%xtra(Qtb_curr)                                 !g cm^2
+               Qmax_next = s%xtra(Qmax_curr)                               !g cm^2
+               s%xtra(Q_curr) = s%xtra(Qtb_curr)                           !g cm^2
+               Q_next = s%xtra(Q_curr)                                     !g cm^2
+               e_next = s%xtra(e_curr)                                     !dimensionless
+               aa_next = s%xtra(aa_curr)                                   !cm
+               bb_next = s%xtra(bb_curr)                                   !cm
+               mom_inert_next = s%xtra(mom_inert_curr)                     !gm cm^2
 
-         else 
-            if (s%xtra(e_curr) > 0.817) then 
-               s%xtra(e_curr) = 0.817                               !dimensionless
+               decay_coeff = 1                                             !dimensionless
+
+               s%xtra(strain_curr) = 2*cgrav*((s%xtra(omega_curr))**2)*(s%xtra(Q_curr))/(D*(clight**4)) !dimensionless
+               strain_next = s%xtra(strain_curr)    !dimensionless
+
+            else 
+               if (s%xtra(e_curr) > 0.817) then 
+                  s%xtra(e_curr) = 0.817                               !dimensionless
+               end if
+
+               call Req_and_beta(s%xtra(e_curr), Req, Rbar, beta)
+               omega_func_curr = (mdot*sqrt(cgrav*s%xtra(M_ns_curr)*Req) - (32*cgrav*(s%xtra(omega_curr)**5)*(s%xtra(Q_curr)**2))/(5*clight**5))/s%xtra(mom_inert_curr)
+               call omega_and_q(id, ierr, M_ns_next, omega_func_curr, cgrav)
+               strain_next = 2*cgrav*(omega_next**2)*Q_next/(D*(clight**4))  !dimensionless
+
             end if
 
-            call Req_and_beta(s%xtra(e_curr), Req, Rbar, beta)
-            omega_func_curr = (mdot*sqrt(standard_cgrav*s%xtra(M_ns_curr)*Req) - (32*standard_cgrav*(s%xtra(omega_curr)**5)*(s%xtra(Q_curr)**2))/(5*clight**5))/s%xtra(mom_inert_curr)
-            call omega_and_q(id, ierr, M_ns_next, omega_func_curr)
-            strain_next = 2*standard_cgrav*(omega_next**2)*Q_next/(D*(clight**4))  !dimensionless
+         else if (s%x_ctrl(17) == 0) then ! gravitaional waves disabled
+            Req = 0d0
+            Rbar = 0d0
+            beta = 0d0
+            Qtb_next = 0d0
+            Q_next = 0d0
+            Qmax_next = 0d0
+            strain_next = 0d0
+            ! Keep geometrical / structural quantities unchanged
+            e_next = s%xtra(e_curr)
+            aa_next = s%xtra(aa_curr)
+            bb_next = s%xtra(bb_curr)
+            mom_inert_next = s%xtra(mom_inert_curr)
+            omega_next = s%xtra(omega_curr)
 
          end if
 
+
       end subroutine evaluate_strain
+
+
+      subroutine spline(x, y, n, yp1, ypn, y2)
+         use const_def
+         implicit none
+
+         integer, intent(in) :: n
+         real(dp), dimension(n), intent(in) :: x, y
+         real(dp), intent(in) :: yp1, ypn
+         real(dp), dimension(n), intent(out) :: y2
+         integer :: i
+         real(dp) :: p, sig
+
+         ! Initialize output
+         y2 = 0.0_dp
+
+         ! Check for too small arrays
+         if (n < 2) then
+            return
+         end if
+
+         ! First boundary
+         if (yp1 > 0.99d30) then
+            y2(1) = 0.0_dp
+         else
+            y2(1) = -0.5_dp
+         end if
+
+         ! Loop over interior points safely
+         do i = 2, n - 1
+            if (abs(x(i+1) - x(i-1)) < 1.0d-30) then
+               sig = 0.5d0
+            else
+               sig = (x(i) - x(i-1)) / (x(i+1) - x(i-1))
+            end if
+            p = sig * y2(i-1) + 2.0d0
+            y2(i) = (sig - 1.0d0) / p
+         end do
+
+         ! Last boundary
+         if (ypn > 0.99d30) then
+            y2(n) = 0.0_dp
+         else
+            y2(n) = -0.5_dp
+         end if
+      end subroutine spline
+
+
+      subroutine splint(x, y, y2, n, xint, yint)
+      use const_def
+      implicit none
+      
+      integer, intent(in) :: n
+      real(dp), dimension(n), intent(in) :: x, y, y2
+      real(dp), intent(in) :: xint
+      real(dp), intent(out) :: yint
+      integer :: klo, khi, k
+      real(dp) :: h, b, a
+
+      klo = 1
+      khi = n
+      do while (khi - klo > 1)
+         k = (khi + klo) / 2
+         if (x(k) > xint) then
+            khi = k
+         else
+            klo = k
+         end if
+      end do
+
+      h = x(khi) - x(klo)
+      if (h == 0.0d0) then
+         print *, 'Error: xint is out of range.'
+         stop
+      end if
+
+      a = (x(khi) - xint) / h
+      b = (xint - x(klo)) / h
+      yint = a * y(klo) + b * y(khi) + ((a**3 - a) * y2(klo) + (b**3 - b) * y2(khi)) * (h**2) / 6.0d0
+      end subroutine splint
+
+
          
       subroutine extras_controls(id, ierr)
          integer, intent(in) :: id
@@ -984,6 +1760,7 @@
          ! otherwise we use a null_ version which does nothing (except warn).
 
          s% other_energy => inject_energy
+         s% other_cgrav => other_cgrav
          s% extras_startup => extras_startup
          s% extras_start_step => extras_start_step
          s% extras_check_model => extras_check_model
@@ -1000,6 +1777,10 @@
          s% data_for_extra_profile_header_items => data_for_extra_profile_header_items
 
       end subroutine extras_controls
+
+      
+
+
       
       subroutine extras_startup(id, restart, ierr)
          integer, intent(in) :: id
@@ -1011,7 +1792,11 @@
          if (ierr /= 0) return
 
       end subroutine extras_startup
-      
+
+
+
+
+
 
       integer function extras_start_step(id)
          integer, intent(in) :: id
@@ -1068,7 +1853,11 @@
          if (ierr /= 0) return
 
          if (prescription == 1) then
-            how_many_extra_history_columns = 44
+            if (s%x_ctrl(19) == 1) then
+               how_many_extra_history_columns = 37   ! smoothing on, the smooth_profile and dEorb.data act as profiles and history
+            else if (s%x_ctrl(19) == 0) then
+               how_many_extra_history_columns = 44
+            end if 
          else
             how_many_extra_history_columns = 44
          end if
@@ -1128,13 +1917,15 @@
          names(35) = 'R95'
          names(36) = 'R90'
          names(37) = 'mdot_edd'
-         names(38) = 'v_ns'
-         names(39) = 'Ra'
-         names(40) = 'mdot_hl'
-         names(41) = 'mdot_MR15'
-         names(42) = 'fd_ns'
-         names(43) = 'fd_hl'
-         names(44) = 'fd_MR15'
+         if (s%x_ctrl(19) == 0) then  ! smoothing disabled
+            names(38) = 'v_ns'
+            names(39) = 'Ra'
+            names(40) = 'mdot_hl'
+            names(41) = 'mdot_MR15'
+            names(42) = 'fd_ns'
+            names(43) = 'fd_hl'
+            names(44) = 'fd_MR15'
+         end if
 
          vals(1) = s%xtra(a_curr)
          vals(2) = efactor*SUM(s% extra_heat(1:s%nz)%val * s% dm(1:s%nz))*s%dt_next
@@ -1161,7 +1952,7 @@
          vals(23) = s%m(azone)
          vals(24) = s%R(azone)
          vals(25) = decay_coeff
-         vals(26) = sqrt(2*standard_cgrav*s% m(azone)/s% R(azone))
+         vals(26) = sqrt(2*s%cgrav(azone)*s% m(azone)/s% R(azone))
          vals(27) = s%u(azone)
          vals(28) = s%csound(azone)
          vals(29) = s%lnT(azone)
@@ -1179,23 +1970,26 @@
          vals(36) = s%R(zone_temp)
          vals(37) = mdot_edd(azone)
 
-         if (prescription == 1) then
-            vals(38) = v(azone)
-            vals(39) = Ra(azone)
-            vals(40) = mdot_hl(azone)
-            vals(41) = mdot_mr15(azone)
-            vals(42) = fd_arr(azone)
-            vals(43) = fd_hl(azone)
-            vals(44) = fd_mr15(azone)
-         else if (prescription == 2) then
-            vals(38) = v_rel
-            vals(39) = Ra_br
-            vals(40) = mdot_hl_br
-            vals(41) = mdot_mr15_br
-            vals(42) = fd_br
-            vals(43) = fd_hl_br
-            vals(44) = fd_mr15_br
-         end if
+         if (s%x_ctrl(19) == 0) then  ! smoothing disabled
+
+            if (prescription == 1) then
+               vals(38) = v(azone)
+               vals(39) = Ra(azone)
+               vals(40) = mdot_hl(azone)
+               vals(41) = mdot_mr15(azone)
+               vals(42) = fd_arr(azone)
+               vals(43) = fd_hl(azone)
+               vals(44) = fd_mr15(azone)
+            else if (prescription == 2) then
+               vals(38) = v_rel
+               vals(39) = Ra_br
+               vals(40) = mdot_hl_br
+               vals(41) = mdot_mr15_br
+               vals(42) = fd_br
+               vals(43) = fd_hl_br
+               vals(44) = fd_mr15_br
+            end if
+         end if 
 
       end subroutine data_for_extra_history_columns
 
