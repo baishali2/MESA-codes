@@ -4,14 +4,14 @@
 
 &star_job
 
-  ! load 12 solar mass model
+  ! load 2 solar mass model
     load_saved_model = .true.
-    load_model_filename = '12M_z0.01_551_bc_1msun.mod'
+    load_model_filename = 'agb_without_bc_9765.mod'
     set_initial_model_number = .true.
 
   ! save a model at the end of the run
     save_model_when_terminate = .true.
-    save_model_filename = '12M_gaussian.mod'
+    save_model_filename = 'agb_test.mod'
 
   ! display on-screen plots
     pgstar_flag = .false.
@@ -51,16 +51,26 @@
 
 &kap
 
-  Zbase = 0.01
+  Zbase = 0.02
 
 / ! end of kap namelist
 
 
 &controls
 
+    profile_interval = 20
+  
+
+    photo_digits = 6
+
+
+    relax_hard_limits_after_retry = .true.
+
+    okay_to_reduce_gradT_excess = .true.
+
   ! when to stop
     max_age = 2d1
-    min_timestep_limit = 1d-60
+    min_timestep_limit = 1d-100
     !max_age_in_seconds = 1d8
    
   ! hydrodynamic boundary conditions
@@ -70,9 +80,10 @@
   ! energy controls
     use_other_energy = .true.
     use_other_wind = .false.
+    use_other_cgrav = .true.
   
   ! extra controls
-    x_ctrl(1) = 1.33                !initial mass of NS (Msun)
+    x_ctrl(1) = 0.534                   !initial mass of NS (Msun)
     x_ctrl(2) = 0.1                 !opacity (cm^2 g^-1)
     x_ctrl(3) = 1                   !efficiency factor
     x_ctrl(4) = 1                   !efactor to multiply to edot
@@ -85,8 +96,15 @@
     x_ctrl(11) = 2.8                !distance to source (kpc)
     x_ctrl(12) = 0.2                !this times the initial orbital period = envelope rotation period
     x_ctrl(13) = 1                  !which prescription: 1 - Holgado, 2 - Bronner
-
+    x_ctrl(16) = 1                  !enable or disable energy injection: 1 - enabled, 0 - disabled
+    x_ctrl(17) = 0                  !enable or disable gravitational wave contributions : 1 - enabled, 0 - disabled
+    x_ctrl(18) = 0                  !enable or disable accretion : 0 - disabled, 1 - enabled
+    x_ctrl(19) = 2                  !which prescription, 0- holgado, 1-holgado+smoothing, 2-holgado+input force
+    x_ctrl(20) = 1                  !enable or disable the gravitational effect of the companion : 1 - enabled, 0 - disabled
+    x_ctrl(21) = 0                  !use holgado_ostriker_prescription by default, 0 - use holgado_prescription(onlt MR15)
+  
   ! atmosphere
+    Pextra_factor = 2.0d0
 
   ! rotation
 
@@ -97,26 +115,29 @@
   ! mixing
 
   ! timesteps
-     max_timestep = 5d2 ! 1e-5 years
+     max_timestep =  1.8d3   ! 1e-5 years for 5d2, now 10 hours essentially
      min_timestep_factor = 0.8d0
-     time_delta_coeff = 0.4d0 ! 50% of CFL-like condition
+     time_delta_coeff = 0.4d0 ! 0.4d0 - 50% of CFL-like condition
+     !max_timestep_factor = 3.0d0  ! testing
 
   ! mesh
      !Only in the case of HLLC solver 
      use_split_merge_amr = .true.
-     split_merge_amr_log_zoning = .false.
+     split_merge_amr_log_zoning = .true. 
     !  trace_split_merge_amr = .true.
-     split_merge_amr_mesh_delta_coeff = 1.25d-2 !128x res     !8.4d-3 ~120 times better spatial resolution
+     split_merge_amr_mesh_delta_coeff = 1.25d-2 !128x res     !8.4d-3 ~120 times better spatial resolution  !initially was 1.25d-2
+     !max_allowed_nz = 100000
 
   ! solver
      ! options for energy conservation (see MESA V, Section 3)
      energy_eqn_option = 'dedt'
      use_gold_tolerances = .true.
+     
 
   ! output
      max_num_profile_models = 200000
-     max_tries_for_retry = 50
-     retry_limit = 200
+     max_tries_for_retry = 100
+     retry_limit = 300
 
     !  log_directory = 'LOGS_files/600_try'
     !  photo_directory = 'photos_files/600_try'
