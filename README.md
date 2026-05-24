@@ -1,4 +1,11 @@
+To run any of the simulations: There are two ways to run the simlations. First, you need to have the original mesa-24.08.1 or any other latest version of MESA on your system/server. The only modifications over original MESA work directory are contained in these 2 files: inlist_project and run_star_extras.
+
+Then, either you can download this entire directory and remove the versions of inlist_project and run_star_extras that you would not need. For example, to run the RGB simulation, you will need the starting model rgb_model_558_withbc.mod, inlist_project_rgb, and run_star_extras_rgb.f90 from the src folder. You can remove the inlist_project_agb, and all the versions of run_star_extras_agb. Then you can run it following MESA's standard procedure. 
+
+Or, you can just download these files separately and replace the original MESA versions of inlist_project and run_star_extras with the versions that you will need, and add the starting model. Then again you can run following MESA's standard procedure. 
+
 Details of the different files here:
+
 
 inlist_project_rgb : inlist project for the RGB simulation.
 
