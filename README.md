@@ -36,9 +36,9 @@ separation reached 122 R⊙, which was 20.3 days. I then started reading the dra
 force data from 20.3 days onward, keeping the start time of my simulation at
 zero.
 
-4. run_star_extras_agb_model3.f90 : Code for AGB simulation Model 3. In the first part of the simulation, up to 95 days, I neglect the motion of the
+4. run_star_extras_agb_model3_final.f90 : Code for AGB simulation Model 3. In the first part of the simulation, up to 97 days, I neglect the motion of the
 core with respect to the envelope. Consequently, by ignoring the motion of the core, I only calculate the ϕ compo-
-nent of the drag force on the companion(F2,ϕ). From 95 days onwards, I again take into account the motion of the core.
+nent of the drag force on the companion(F2,ϕ). From 97 days onwards, I again take into account the motion of the core.
 Accordingly, I take the drag force to be Fϕ, calculated with the same method
 as in model 1. To solve the time mismatch issue, instead of reading the drag force data from
 a later time, I start the simulation with the companion just outside the envelope
