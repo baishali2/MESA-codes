@@ -1318,7 +1318,7 @@
          k = azone_temp
 
          ! mass is in g, radius is in cm, time is in s
-         Ra = 2*standard_cgrav*M/(v**2)                 !cm
+         Ra = 2*standard_cgrav*M/(v**2 + s%csound(k)**2)                 !cm
          mdot_hl = pi*(Ra**2)*(s%rho_face(k))*v           !g/s
          fd_hl = mdot_hl*v                           !dyne (g cm s^-2)
          edot_hl = fd_hl*v                          !erg/s
